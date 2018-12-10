@@ -8,9 +8,9 @@ def gen_char(f, char):
     for j in range(0, random.randint(1, 10)):
             f.write(char)
 
-def gen_pos():
+def gen_pos(num):
     f = open("pos_examples", "w+")
-    for i in range(0, 499):
+    for i in range(num):
         gen_int(f)
 
         gen_char(f, "a")
@@ -34,9 +34,9 @@ def gen_pos():
     f.close()
 
 
-def gen_neg():
+def gen_neg(num):
     f = open("neg_examples", "w+")
-    for i in range(0, 499):
+    for i in range(num):
         gen_int(f)
 
         gen_char(f, "a")
@@ -60,8 +60,8 @@ def gen_neg():
     f.close()
 
 def main():
-    gen_pos()
-    gen_neg()
+    gen_pos(500)
+    gen_neg(500)
 
 if __name__ == "__main__":
     main()
