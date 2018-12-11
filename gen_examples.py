@@ -60,8 +60,8 @@ def gen_neg(num):
     f.close()
 
 def main():
-    gen_pos(500)
-    gen_neg(500)
+    gen_pos(1000)
+    gen_neg(1000)
 
 if __name__ == "__main__":
     main()
