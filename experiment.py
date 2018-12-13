@@ -9,7 +9,7 @@ from random import shuffle
 
 
 VOCAB_SIZE= 13
-EPOCHS = 2
+EPOCHS = 20
 HIDDEN_DIM = 100
 EMBEDDING_DIM=50
 HIDDEN_DIM2 = 50
@@ -156,8 +156,8 @@ def run_model(model,letter_to_index,optimizer,loss_function,train_set,test_set):
 
 def main():
 
-    letter_to_index,index_to_letter=letter_index_structures("pos_examples","neg_examples")
-    train_set,test_set= create_data_set("pos_examples","neg_examples")
+    letter_to_index,index_to_letter=letter_index_structures("pos_palindrom","neg_palindrom")
+    train_set,test_set= create_data_set("pos_palindrom","neg_palindrom")
     model=LSTMLanguageClassifier(VOCAB_SIZE,EMBEDDING_DIM,HIDDEN_DIM,LABEL_SIZE,1,use_gpu)
     if use_gpu:
         model= model.cuda()
