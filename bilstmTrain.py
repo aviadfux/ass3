@@ -7,6 +7,7 @@ import torch.optim as optim
 import numpy as np
 import gen_examples as gen
 from random import shuffle
+import pylab
 
 UNKNOWN= "__UNKNOWWN__"
 EMBEDDING_DIM=5
@@ -16,9 +17,9 @@ SENTENCE_BATCH=500
 LR=0.01
 use_gpu=torch.cuda.is_available()
 
-class data_holder:
+class Data_holder:
 
-    def __init__(self,train_filepath,test_filepath,dev_filepath=None):
+    def __init__(self,train_filepath,dev_filepath=None):
         self.file_path = train_filepath
         self.word_to_index={UNKNOWN:0}
         self.index_to_word=[UNKNOWN]
@@ -32,13 +33,14 @@ class data_holder:
         self.index_to_suffix=[]
         self.sentences= []
         self.dev_sentences=[]
+        self.test_sentences=[]
         self.update_data_structues()
         if dev_filepath != None:
             self.load_dev_data(dev_filepath)
-        self.load_test_data(test_filepath)
 
     def update_data_structues(self):
         f=open(self.file_path,"r")
+        sentence = []
         for i,line in enumerate(f):
             if line == '\n':
                 self.sentences.append(sentence)
@@ -73,6 +75,7 @@ class data_holder:
 
     def load_dev_data(self,file_path):
         f = open(file_path, "r")
+        sentence = []
         for i, line in enumerate(f):
             if line == '\n':
                 self.dev_sentences.append(sentence)
@@ -84,6 +87,7 @@ class data_holder:
 
     def load_test_data(self, file_path):
         f = open(file_path, "r")
+        sentence = []
         for i, line in enumerate(f):
             if line == '\n':
                 self.train_sentences.append(sentence)
@@ -98,6 +102,7 @@ class biLSTM(nn.Module):
         super(biLSTM, self).__init__()
         self.batch_size=batch_size
         self.data_holder=data_holder
+        self.hidden_dim=hidden_dim
         self.word_embedding=nn.Embedding(word_vocab_size,embedding_dim)
         self.char_embedding = nn.Embedding(char_vocab_size,embedding_dim)
         self.preffix_embedding= nn.Embedding(prefix_vocab_size,embedding_dim)
@@ -106,59 +111,70 @@ class biLSTM(nn.Module):
         self.char_lstm = nn.LSTM(embedding_dim,embedding_dim)
         self.lstm_first= nn.LSTM(embedding_dim,hidden_dim,bidirectional=True)
         self.lstm_second =nn.LSTM(hidden_dim*2,hidden_dim,bidirectional=True)
-        self.linear= nn.Linear(hidden_dim,output_size)
+        self.linear= nn.Linear(hidden_dim*2,output_size)
         self.linear_d=nn.Linear(embedding_dim*2,embedding_dim)
 
     def init_hidden(self):
-        if self.use_gpu:
-            h0_1 = Variable(torch.zeros(1, self.batch_size, self.hidden_dim).cuda())
-            c0_1 = Variable(torch.zeros(1, self.batch_size, self.hidden_dim).cuda())
-            h0_2 = Variable(torch.zeros(1, self.batch_size, self.hidden_dim*2).cuda())
-            c0_2= Variable(torch.zeros(1, self.batch_size, self.hidden_dim*2).cuda())
+        if use_gpu:
+            h0_1 = Variable(torch.zeros(2, self.batch_size, self.hidden_dim).cuda())
+            c0_1 = Variable(torch.zeros(2, self.batch_size, self.hidden_dim).cuda())
+            h0_2 = Variable(torch.zeros(2, self.batch_size, self.hidden_dim).cuda())
+            c0_2= Variable(torch.zeros(2, self.batch_size, self.hidden_dim).cuda())
         else:
-            h0_1 = Variable(torch.zeros(1, self.batch_size, self.hidden_dim))
-            c0_1 = Variable(torch.zeros(1, self.batch_size, self.hidden_dim))
-            h0_2 = Variable(torch.zeros(1, self.batch_size, self.hidden_dim))
-            c0_2 = Variable(torch.zeros(1, self.batch_size, self.hidden_dim))
+            h0_1 = Variable(torch.zeros(2, self.batch_size, self.hidden_dim))
+            c0_1 = Variable(torch.zeros(2, self.batch_size, self.hidden_dim))
+            h0_2 = Variable(torch.zeros(2, self.batch_size, self.hidden_dim))
+            c0_2 = Variable(torch.zeros(2, self.batch_size, self.hidden_dim))
         return (h0_1, c0_1),(h0_2,c0_2)
+
+
+
+    def forward(self, input,first_hidden,second_hidden,repr):
+        input = input.view(len(input), 1, -1)
+        first_lstm_output,first_hidden=self.lstm_first(input,first_hidden)
+        first_lstm_output = first_lstm_output[-1].view(len(first_lstm_output[-1]), 1, -1)
+        second_lstm_output,second_hidden=self.lstm_second(first_lstm_output,second_hidden)
+        output=torch.tanh(self.linear(second_lstm_output))
+        props= torch.F.softmax(output,dim=1)
+        return props
 
     def set_word_input(self,word_input,repr):
         if repr=='a':
-            embeder=self.word_embedding(self.data_holder.word_to_index_f(word_input))
+            input_tensor= torch.tensor(self.data_holder.word_to_index_f(word_input),dtype=torch.long)
+            embeder=self.word_embedding(input_tensor)
             return embeder
         elif repr=='b':
             char_embedders=[]
             for c in word_input:
-                char_embedders.append(self.char_embedding(self.data_holder.char_to_index[c]))
+                char_embedders.append(torch.tensor(self.char_embedding(self.data_holder.char_to_index[c]),dtype=torch.long))
+            if use_gpu:
+                char_embedders=Variable(char_embedders.cuda())
+            else:
+                char_embedders = Variable(char_embedders)
             char_lstm_out= self.char_lstm(char_embedders)
             return char_lstm_out[-1]
         elif repr== 'c':
-            embeder = self.word_embedding(self.data_holder.word_to_index_f(word_input))
-            pref_embeder= self.preffix_embedding(self.data_holder.prefix_to_index(word_input[:3]))
-            suff_embeder = self.suffix_embedding(self.data_holder.suffix_to_index(word_input[-3:]))
+            embeder = self.word_embedding(torch.tensor(self.data_holder.word_to_index_f(word_input),dtype=torch.long))
+            pref_embeder= self.preffix_embedding(torch.tensor(self.data_holder.prefix_to_index(word_input[:3]),dtype=torch.long))
+            suff_embeder = self.suffix_embedding(torch.tensor(self.data_holder.suffix_to_index(word_input[-3:]),dtype=torch.long))
             embeder=embeder.add(pref_embeder).add(suff_embeder)
             return embeder
         elif repr== 'd':
-            embeder=self.word_embedding(self.data_holder.word_to_index_f(word_input))
+            input_tensor = torch.tensor(self.data_holder.word_to_index_f(word_input), dtype=torch.long)
+            embeder = self.word_embedding(input_tensor)
             char_embedders = []
             for c in word_input:
-                char_embedders.append(self.char_embedding(self.data_holder.char_to_index[c]))
+                char_embedders.append(torch.tensor(self.char_embedding(self.data_holder.char_to_index[c]),dtype=torch.long))
+            if use_gpu:
+                char_embedders=Variable(char_embedders.cuda())
+            else:
+                char_embedders = Variable(char_embedders)
             char_lstm_out = self.char_lstm(char_embedders)
             concat_embeder= torch.cat(embeder,char_lstm_out[-1])
             embeder=torch.tanh(self.linear_d(concat_embeder))
             return embeder
 
-
-    def forward(self, input,first_hidden,second_hidden,repr):
-        input=[self.set_word_input(word_input) for word_input in input]
-        first_lstm_output,first_hidden=self.lstm_first(input,first_hidden)
-        second_lstm_output,second_hidden=self.lstm_second(first_lstm_output[-1],second_hidden)
-        output=self.linear[second_lstm_output[-1]]
-        props= torch.F.softmax(output,dim=1)
-        return props
-
-
-def run_epoch(data_holder,model,use_gpu,loss_function,optimizer,train,repr):
+def run_epoch(data_holder,model,use_gpu,loss_function,optimizer,embedding_dim,train,repr):
     total_acc = 0.0
     total_loss = 0.0
     total = 0.0
@@ -169,14 +185,15 @@ def run_epoch(data_holder,model,use_gpu,loss_function,optimizer,train,repr):
         sentences=data_holder.dev_sentences
     for i,sentence in enumerate(sentences):
         s= [w for w,l in sentence]
+        input_tensor = torch.zeros((len(s),embedding_dim)).float()
+        for i,w in enumerate(s):
+            input_tensor[i]=model.set_word_input(w,repr)
         l= [data_holder.label_to_index[l] for w,l in sentence]
-        input_tensor = torch.tensor(s,dtype=torch.long)
         output_tensor = torch.tensor(l, dtype=torch.long)
         if use_gpu:
             input_tensor, output_tensor = Variable(input_tensor.cuda()), output_tensor.cuda()
         else:
             input_tensor = Variable(input_tensor)
-
         hidden1,hidden2 = model.init_hidden()
         output = model(input_tensor,hidden1,hidden2,repr)
         loss = loss_function(output, output_tensor)
@@ -198,40 +215,58 @@ def run_epoch(data_holder,model,use_gpu,loss_function,optimizer,train,repr):
     return total_acc/total, total_loss/total,accuracy_list
 
 
-def train_model(model,loss_function,train_data_holder,dev_data,lr,epochs,repr,save_model_path):
+def train_model(model,loss_function,data_holder,lr,epochs,embedding_dim,repr,save_model_path):
     optimizer = optim.Adam(model.parameters(), lr=lr)
     for epoch in range(epochs):
-        shuffle(train_data_holder)
+        shuffle(data_holder.sentences)
         model.train()
         model.zero_grad()
-        train_loss, train_acc,_ = run_epoch(train_data_holder,model,use_gpu,loss_function,optimizer,True,repr)
+        train_loss, train_acc,_ = run_epoch(data_holder,model,use_gpu,loss_function,optimizer,embedding_dim,True,repr)
         model.eval()
-        dev_loss, dev_acc,acc_list = run_epoch(train_data_holder,model,use_gpu,loss_function,optimizer,True,repr)
+        dev_loss, dev_acc,acc_list = run_epoch(data_holder,model,use_gpu,loss_function,optimizer,embedding_dim,False,repr)
         print("{} - train loss {} train-accuracy {} dev loss {}  dev-accuracy {}".format(epoch, train_loss, train_acc,
                                                                                          dev_loss, dev_acc))
         torch.save(model.state_dict(), save_model_path+str(epoch))
     return acc_list
 
 
+def plotdata(a_data,b_data,c_data,d_data,x_axis_name,y_axis_name,title):
+    size=len(a_data)
+    x=[]
+    for i in range(size):
+        x.append((i+1)*5)
+    pylab.plot(x,a_data,"-r")
+    pylab.plot(x, b_data, "-b")
+    pylab.plot(x, c_data, "-g")
+    pylab.plot(x, d_data, "-y")
+    pylab.title(title)
+    pylab.xlabel(x_axis_name)
+    pylab.ylabel(y_axis_name)
+    pylab.show()
 
 
-
-def turn_model_flag_type(repr):
-    word_flag = False
-    char_flag = False
-    pref_suffix_flag = False
-    if repr == 'a':
-        word_flag = True
-    elif repr == 'b':
-        char_flag = True
-    elif repr == 'c':
-        word_flag = True
-        pref_suffix_flag = True
-    elif repr == 'd':
-        word_flag = True
-        char_flag = True
-    return word_flag,char_flag,pref_suffix_flag
-
+# def turn_model_flag_type(repr):
+#     word_flag = False
+#     char_flag = False
+#     pref_suffix_flag = False
+#     if repr == 'a':
+#         word_flag = True
+#     elif repr == 'b':
+#         char_flag = True
+#     elif repr == 'c':
+#         word_flag = True
+#         pref_suffix_flag = True
+#     elif repr == 'd':
+#         word_flag = True
+#         char_flag = True
+#     return word_flag,char_flag,pref_suffix_flag
+def write_acc_to_file(filename,repr,acc_list):
+    f=open(filename,"a")
+    f.write("repr   " + repr + "\n")
+    for acc in acc_list:
+        f.write(str(acc)+ "\n")
+    f.write("\n\n")
+    f.close()
 def main():
     repr=sys.argv[1]
     train_file= sys.argv[2]
@@ -239,4 +274,16 @@ def main():
     if len(sys.argv)>=5:
         dev_file = sys.argv[4]
 
-    word_flag, char_flag, pref_suffix_flag=turn_model_flag_type(repr)
+    data_holder=Data_holder(train_file,dev_file)
+    prefix_vocab_size=len(data_holder.prefix_to_index)
+    suffix_vocab_size = len(data_holder.suffix_to_index)
+    char_vocab_size = len(data_holder.char_to_index)
+    word_vocab_size=len(data_holder.word_to_index)
+    output_size= len(data_holder.label_to_index)
+    model= biLSTM(data_holder,EMBEDDING_DIM,1,HIDDEN_DIM,prefix_vocab_size,suffix_vocab_size,char_vocab_size,word_vocab_size,output_size)
+    loss_function=nn.CrossEntropyLoss()
+    acc_list=train_model(model,loss_function,data_holder,LR,EPOCHS,EMBEDDING_DIM,repr,model_file)
+    write_acc_to_file("acc_list.txt",repr,acc_list)
+
+if __name__ == '__main__':
+    main()
