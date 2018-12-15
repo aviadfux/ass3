@@ -8,15 +8,15 @@ import numpy as np
 import gen_examples as gen
 from random import shuffle
 import pylab
-
+import copy
 UNKNOWN= "__UNKNOWWN__"
-EMBEDDING_DIM=5
-HIDDEN_DIM=10
+EMBEDDING_DIM=50
+HIDDEN_DIM=70
 EPOCHS=5
 SENTENCE_BATCH=500
 LR=0.01
-use_gpu=torch.cuda.is_available()
-
+# use_gpu=torch.cuda.is_available()
+use_gpu=False
 class Data_holder:
 
     def __init__(self,train_filepath,dev_filepath=None):
@@ -103,40 +103,59 @@ class biLSTM(nn.Module):
         self.batch_size=batch_size
         self.data_holder=data_holder
         self.hidden_dim=hidden_dim
+        self.embedding_dim=embedding_dim
         self.word_embedding=nn.Embedding(word_vocab_size,embedding_dim)
         self.char_embedding = nn.Embedding(char_vocab_size,embedding_dim)
         self.preffix_embedding= nn.Embedding(prefix_vocab_size,embedding_dim)
         self.suffix_embedding= nn.Embedding(suffix_vocab_size,embedding_dim)
 
         self.char_lstm = nn.LSTM(embedding_dim,embedding_dim)
-        self.lstm_first= nn.LSTM(embedding_dim,hidden_dim,bidirectional=True)
-        self.lstm_second =nn.LSTM(hidden_dim*2,hidden_dim,bidirectional=True)
+        self.lstm_forward1= nn.LSTM(embedding_dim,hidden_dim)
+        self.lstm_backward1 = nn.LSTM(embedding_dim,hidden_dim)
+        self.lstm_forward2 = nn.LSTM(hidden_dim*2, hidden_dim)
+        self.lstm_backward2 = nn.LSTM(hidden_dim*2, hidden_dim)
+
         self.linear= nn.Linear(hidden_dim*2,output_size)
         self.linear_d=nn.Linear(embedding_dim*2,embedding_dim)
 
     def init_hidden(self):
         if use_gpu:
-            h0_1 = Variable(torch.zeros(2, self.batch_size, self.hidden_dim).cuda())
-            c0_1 = Variable(torch.zeros(2, self.batch_size, self.hidden_dim).cuda())
-            h0_2 = Variable(torch.zeros(2, self.batch_size, self.hidden_dim).cuda())
-            c0_2= Variable(torch.zeros(2, self.batch_size, self.hidden_dim).cuda())
+            h0_1 = Variable(torch.zeros(1, self.batch_size, self.hidden_dim).cuda())
+            c0_1 = Variable(torch.zeros(1, self.batch_size, self.hidden_dim).cuda())
         else:
-            h0_1 = Variable(torch.zeros(2, self.batch_size, self.hidden_dim))
-            c0_1 = Variable(torch.zeros(2, self.batch_size, self.hidden_dim))
-            h0_2 = Variable(torch.zeros(2, self.batch_size, self.hidden_dim))
-            c0_2 = Variable(torch.zeros(2, self.batch_size, self.hidden_dim))
-        return (h0_1, c0_1),(h0_2,c0_2)
+            h0_1 = Variable(torch.zeros(1, self.batch_size, self.hidden_dim))
+            c0_1 = Variable(torch.zeros(1, self.batch_size, self.hidden_dim))
+        return (h0_1, c0_1)
 
+    def init_hidden_embedding(self):
+        if use_gpu:
+            h0_1 = Variable(torch.zeros(1, self.batch_size, self.embedding_dim).cuda())
+            c0_1 = Variable(torch.zeros(1, self.batch_size, self.embedding_dim).cuda())
+        else:
+            h0_1 = Variable(torch.zeros(1, self.batch_size, self.embedding_dim))
+            c0_1 = Variable(torch.zeros(1, self.batch_size, self.embedding_dim))
+        return (h0_1, c0_1)
 
-
-    def forward(self, input,first_hidden,second_hidden,repr):
+    def forward(self, input,hidden,repr,output_size):
         input = input.view(len(input), 1, -1)
-        first_lstm_output,first_hidden=self.lstm_first(input,first_hidden)
-        first_lstm_output = first_lstm_output[-1].view(len(first_lstm_output[-1]), 1, -1)
-        second_lstm_output,second_hidden=self.lstm_second(first_lstm_output,second_hidden)
-        output=torch.tanh(self.linear(second_lstm_output))
-        props= torch.F.softmax(output,dim=1)
-        return props
+        first_hidden_f=hidden
+        first_hidden_b = copy.copy(hidden)
+        second_hidden_f = copy.copy(hidden)
+        second_hidden_b = copy.copy(hidden)
+        first_lstm_output_f, first_hidden_f = self.lstm_forward1(input, first_hidden_f)
+        first_lstm_output_b, first_hidden_b = self.lstm_backward1(reversed(input), first_hidden_b)
+        first_concat=[torch.cat([f,b],dim=1) for f,b in zip(first_lstm_output_f,reversed(first_lstm_output_b))]
+        first_concat= torch.stack(first_concat)
+        second_lstm_output_f, second_hidden_f = self.lstm_forward2(first_concat, second_hidden_f)
+        second_lstm_output_b, second_hidden_b = self.lstm_backward2(reversed(first_concat), second_hidden_b)
+        second_concat=[torch.cat([f,b],dim=1) for f,b in zip(second_lstm_output_f,reversed(second_lstm_output_b))]
+        second_concat=torch.stack(second_concat)
+        predictions=torch.zeros(len(input),1,output_size)
+        for i,s in enumerate(second_concat):
+            output=self.linear(s)
+            probs= torch.softmax(output,dim=1)
+            predictions[i]=probs
+        return predictions
 
     def set_word_input(self,word_input,repr):
         if repr=='a':
@@ -144,14 +163,15 @@ class biLSTM(nn.Module):
             embeder=self.word_embedding(input_tensor)
             return embeder
         elif repr=='b':
-            char_embedders=[]
-            for c in word_input:
-                char_embedders.append(torch.tensor(self.char_embedding(self.data_holder.char_to_index[c]),dtype=torch.long))
+            char_embedders=torch.zeros(len(word_input),1)
+            for i,c in enumerate(word_input):
+                char_embedders[i]=self.char_embedding(torch.tensor(self.data_holder.char_to_index[c],dtype=torch.long))
             if use_gpu:
                 char_embedders=Variable(char_embedders.cuda())
             else:
                 char_embedders = Variable(char_embedders)
-            char_lstm_out= self.char_lstm(char_embedders)
+            hidden= self.init_hidden_embedding()
+            char_lstm_out,hidden= self.char_lstm(char_embedders,hidden)
             return char_lstm_out[-1]
         elif repr== 'c':
             embeder = self.word_embedding(torch.tensor(self.data_holder.word_to_index_f(word_input),dtype=torch.long))
@@ -163,22 +183,51 @@ class biLSTM(nn.Module):
             input_tensor = torch.tensor(self.data_holder.word_to_index_f(word_input), dtype=torch.long)
             embeder = self.word_embedding(input_tensor)
             char_embedders = []
-            for c in word_input:
-                char_embedders.append(torch.tensor(self.char_embedding(self.data_holder.char_to_index[c]),dtype=torch.long))
+            for i,c in enumerate(word_input):
+                char_embedders[i]=self.char_embedding(torch.tensor(self.data_holder.char_to_index[c],dtype=torch.long))
             if use_gpu:
                 char_embedders=Variable(char_embedders.cuda())
             else:
                 char_embedders = Variable(char_embedders)
-            char_lstm_out = self.char_lstm(char_embedders)
-            concat_embeder= torch.cat(embeder,char_lstm_out[-1])
+            hidden = self.init_hidden_embedding()
+            char_lstm_out,hidden= self.char_lstm(char_embedders,hidden)
+            concat_embeder= torch.cat([embeder,char_lstm_out[-1]],dim=1)
             embeder=torch.tanh(self.linear_d(concat_embeder))
             return embeder
+def dev_accuracy(data_holder,model,embedding_dim,output_size,repr):
+    total_acc = 0.0
+    total = 0.0
+    model.eval()
+    for i,sentence in enumerate(data_holder.dev_sentences):
+        s= [w for w,l in sentence]
+        input_tensor = torch.zeros((len(s),embedding_dim)).float()
+        for i,w in enumerate(s):
+            input_tensor[i]=model.set_word_input(w,repr)
+        l= [data_holder.label_to_index[l] for w,l in sentence]
+        output_tensor = torch.tensor(l, dtype=torch.long)
+        if use_gpu:
+            input_tensor, output_tensor = Variable(input_tensor.cuda()), output_tensor.cuda()
+        else:
+            input_tensor = Variable(input_tensor)
+        hidden=model.init_hidden()
+        output = model(input_tensor,hidden,repr,output_size)
+        output_tensor=output_tensor.view(len(output_tensor))
+        for pred,out in zip(output,output_tensor):
+            pred = torch.argmax(pred, 1)
+            total+=1
+            if pred[0]==out.item():
+                if data_holder.index_to_label[out]== 'O':
+                    total -= 1
+                else:
+                    total_acc +=1
+    print (str(total_acc/total) + "\n")
+    return total_acc/total
 
-def run_epoch(data_holder,model,use_gpu,loss_function,optimizer,embedding_dim,train,repr):
+def run_epoch(data_holder,model,use_gpu,loss_function,optimizer,embedding_dim,output_size,train,repr,accuracy_list):
     total_acc = 0.0
     total_loss = 0.0
     total = 0.0
-    accuracy_list=[]
+
     if train:
         sentences=data_holder.sentences
     else:
@@ -194,40 +243,45 @@ def run_epoch(data_holder,model,use_gpu,loss_function,optimizer,embedding_dim,tr
             input_tensor, output_tensor = Variable(input_tensor.cuda()), output_tensor.cuda()
         else:
             input_tensor = Variable(input_tensor)
-        hidden1,hidden2 = model.init_hidden()
-        output = model(input_tensor,hidden1,hidden2,repr)
-        loss = loss_function(output, output_tensor)
+        hidden=model.init_hidden()
+        output = model(input_tensor,hidden,repr,output_size)
+        output_loss=output.view(len(output),-1)
+        output_tensor=output_tensor.view(len(output_tensor))
+        loss = loss_function(output_loss, output_tensor)
         if train:
             loss.backward()
             optimizer.step()
             model.zero_grad()
-        _, predicted = torch.max(output.data, 1)
-        for pred,out in zip(predicted,output_tensor):
+        for pred,out in zip(output,output_tensor):
+            pred = torch.argmax(pred, 1)
             total+=1
-            if pred==out:
+            if pred[0]==out.item():
                 if data_holder.index_to_label[out]== 'O':
                     total -= 1
                 else:
                     total_acc +=1
         total_loss += loss.item()
-        if not train and i % SENTENCE_BATCH == 0:
-                accuracy_list.append(total_acc)
-    return total_acc/total, total_loss/total,accuracy_list
+        if  i % SENTENCE_BATCH == 0:
+            acc=dev_accuracy(data_holder, model,embedding_dim,output_size,repr)
+            accuracy_list.append(acc)
+            model.train()
+    return total_acc/total, total_loss/total
 
 
-def train_model(model,loss_function,data_holder,lr,epochs,embedding_dim,repr,save_model_path):
+def train_model(model,loss_function,data_holder,lr,epochs,embedding_dim,output_size,repr,save_model_path):
     optimizer = optim.Adam(model.parameters(), lr=lr)
+    accuracy_list = []
     for epoch in range(epochs):
         shuffle(data_holder.sentences)
         model.train()
         model.zero_grad()
-        train_loss, train_acc,_ = run_epoch(data_holder,model,use_gpu,loss_function,optimizer,embedding_dim,True,repr)
+        train_loss, train_acc = run_epoch(data_holder,model,use_gpu,loss_function,optimizer,embedding_dim,output_size,True,repr,accuracy_list)
         model.eval()
-        dev_loss, dev_acc,acc_list = run_epoch(data_holder,model,use_gpu,loss_function,optimizer,embedding_dim,False,repr)
-        print("{} - train loss {} train-accuracy {} dev loss {}  dev-accuracy {}".format(epoch, train_loss, train_acc,
-                                                                                         dev_loss, dev_acc))
+        print("{} - train loss {} train-accuracy {} ".format(epoch, train_loss, train_acc))
+
         torch.save(model.state_dict(), save_model_path+str(epoch))
-    return acc_list
+    write_acc_to_file("pos_acc.txt",repr,accuracy_list)
+
 
 
 def plotdata(a_data,b_data,c_data,d_data,x_axis_name,y_axis_name,title):
@@ -245,21 +299,6 @@ def plotdata(a_data,b_data,c_data,d_data,x_axis_name,y_axis_name,title):
     pylab.show()
 
 
-# def turn_model_flag_type(repr):
-#     word_flag = False
-#     char_flag = False
-#     pref_suffix_flag = False
-#     if repr == 'a':
-#         word_flag = True
-#     elif repr == 'b':
-#         char_flag = True
-#     elif repr == 'c':
-#         word_flag = True
-#         pref_suffix_flag = True
-#     elif repr == 'd':
-#         word_flag = True
-#         char_flag = True
-#     return word_flag,char_flag,pref_suffix_flag
 def write_acc_to_file(filename,repr,acc_list):
     f=open(filename,"a")
     f.write("repr   " + repr + "\n")
@@ -282,8 +321,8 @@ def main():
     output_size= len(data_holder.label_to_index)
     model= biLSTM(data_holder,EMBEDDING_DIM,1,HIDDEN_DIM,prefix_vocab_size,suffix_vocab_size,char_vocab_size,word_vocab_size,output_size)
     loss_function=nn.CrossEntropyLoss()
-    acc_list=train_model(model,loss_function,data_holder,LR,EPOCHS,EMBEDDING_DIM,repr,model_file)
-    write_acc_to_file("acc_list.txt",repr,acc_list)
+    train_model(model,loss_function,data_holder,LR,EPOCHS,EMBEDDING_DIM,output_size,repr,model_file)
+
 
 if __name__ == '__main__':
     main()
