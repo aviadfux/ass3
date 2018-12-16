@@ -14,7 +14,7 @@ EMBEDDING_DIM=50
 HIDDEN_DIM=70
 EPOCHS=5
 SENTENCE_BATCH=500
-LR=0.01
+LR=0.005
 # use_gpu=torch.cuda.is_available()
 use_gpu=False
 class Data_holder:
@@ -71,7 +71,19 @@ class Data_holder:
         if word in self.word_to_index:
             return self.word_to_index[word]
         else:
-            return 1
+            return 0
+
+    def suffix_to_index_f(self,word):
+        if word in self.suffix_to_index:
+            return self.suffix_to_index[word]
+        else:
+            return 0
+
+    def prefix_to_index_f(self,word):
+        if word in self.prefix_to_index:
+            return self.prefix_to_index[word]
+        else:
+            return 0
 
     def load_dev_data(self,file_path):
         f = open(file_path, "r")
@@ -93,8 +105,7 @@ class Data_holder:
                 self.train_sentences.append(sentence)
                 sentence = []
             else:
-                word, label = line.split()
-                sentence.append((word, label))
+                sentence.append(line)
         f.close()
 
 class biLSTM(nn.Module):
@@ -157,41 +168,51 @@ class biLSTM(nn.Module):
             predictions[i]=probs
         return predictions
 
-    def set_word_input(self,word_input,repr):
+    def set_word_input(self,word_input,embedding_dim,repr):
         if repr=='a':
             input_tensor= torch.tensor(self.data_holder.word_to_index_f(word_input),dtype=torch.long)
             embeder=self.word_embedding(input_tensor)
             return embeder
         elif repr=='b':
-            char_embedders=torch.zeros(len(word_input),1)
+            char_embedders=torch.zeros(len(word_input),embedding_dim)
             for i,c in enumerate(word_input):
-                char_embedders[i]=self.char_embedding(torch.tensor(self.data_holder.char_to_index[c],dtype=torch.long))
+                char_tensor=[self.data_holder.char_to_index[c]]
+                char_tensor=torch.tensor(char_tensor)
+                char_embedders[i]=self.char_embedding(char_tensor)
             if use_gpu:
                 char_embedders=Variable(char_embedders.cuda())
             else:
                 char_embedders = Variable(char_embedders)
             hidden= self.init_hidden_embedding()
+            char_embedders=char_embedders.view(len(char_embedders),1,-1)
             char_lstm_out,hidden= self.char_lstm(char_embedders,hidden)
             return char_lstm_out[-1]
         elif repr== 'c':
-            embeder = self.word_embedding(torch.tensor(self.data_holder.word_to_index_f(word_input),dtype=torch.long))
-            pref_embeder= self.preffix_embedding(torch.tensor(self.data_holder.prefix_to_index(word_input[:3]),dtype=torch.long))
-            suff_embeder = self.suffix_embedding(torch.tensor(self.data_holder.suffix_to_index(word_input[-3:]),dtype=torch.long))
+            embeder=[self.data_holder.word_to_index_f(word_input)]
+            embeder = self.word_embedding(torch.tensor(embeder,dtype=torch.long))
+            pref=[self.data_holder.prefix_to_index_f(word_input[:3])]
+            pref_embeder= self.preffix_embedding(torch.tensor(pref,dtype=torch.long))
+            suff=[self.data_holder.suffix_to_index_f(word_input[-3:0])]
+            suff_embeder = self.suffix_embedding(torch.tensor(suff,dtype=torch.long))
             embeder=embeder.add(pref_embeder).add(suff_embeder)
             return embeder
         elif repr== 'd':
             input_tensor = torch.tensor(self.data_holder.word_to_index_f(word_input), dtype=torch.long)
             embeder = self.word_embedding(input_tensor)
-            char_embedders = []
-            for i,c in enumerate(word_input):
-                char_embedders[i]=self.char_embedding(torch.tensor(self.data_holder.char_to_index[c],dtype=torch.long))
+            char_embedders = torch.zeros(len(word_input), embedding_dim)
+            for i, c in enumerate(word_input):
+                char_tensor = [self.data_holder.char_to_index[c]]
+                char_tensor = torch.tensor(char_tensor)
+                char_embedders[i] = self.char_embedding(char_tensor)
             if use_gpu:
-                char_embedders=Variable(char_embedders.cuda())
+                char_embedders = Variable(char_embedders.cuda())
             else:
                 char_embedders = Variable(char_embedders)
             hidden = self.init_hidden_embedding()
-            char_lstm_out,hidden= self.char_lstm(char_embedders,hidden)
-            concat_embeder= torch.cat([embeder,char_lstm_out[-1]],dim=1)
+            char_embedders = char_embedders.view(len(char_embedders), 1, -1)
+            char_lstm_out, hidden = self.char_lstm(char_embedders, hidden)
+            out=char_lstm_out[-1].view(embedding_dim)
+            concat_embeder= torch.cat([embeder,out],dim=0)
             embeder=torch.tanh(self.linear_d(concat_embeder))
             return embeder
 def dev_accuracy(data_holder,model,embedding_dim,output_size,repr):
@@ -202,7 +223,7 @@ def dev_accuracy(data_holder,model,embedding_dim,output_size,repr):
         s= [w for w,l in sentence]
         input_tensor = torch.zeros((len(s),embedding_dim)).float()
         for i,w in enumerate(s):
-            input_tensor[i]=model.set_word_input(w,repr)
+            input_tensor[i]=model.set_word_input(w,embedding_dim,repr)
         l= [data_holder.label_to_index[l] for w,l in sentence]
         output_tensor = torch.tensor(l, dtype=torch.long)
         if use_gpu:
@@ -223,20 +244,16 @@ def dev_accuracy(data_holder,model,embedding_dim,output_size,repr):
     print (str(total_acc/total) + "\n")
     return total_acc/total
 
-def run_epoch(data_holder,model,use_gpu,loss_function,optimizer,embedding_dim,output_size,train,repr,accuracy_list):
+def run_epoch(data_holder,model,use_gpu,loss_function,optimizer,embedding_dim,output_size,repr,accuracy_list):
     total_acc = 0.0
     total_loss = 0.0
     total = 0.0
-
-    if train:
-        sentences=data_holder.sentences
-    else:
-        sentences=data_holder.dev_sentences
+    sentences=data_holder.sentences
     for i,sentence in enumerate(sentences):
         s= [w for w,l in sentence]
         input_tensor = torch.zeros((len(s),embedding_dim)).float()
         for i,w in enumerate(s):
-            input_tensor[i]=model.set_word_input(w,repr)
+            input_tensor[i]=model.set_word_input(w,embedding_dim,repr)
         l= [data_holder.label_to_index[l] for w,l in sentence]
         output_tensor = torch.tensor(l, dtype=torch.long)
         if use_gpu:
@@ -248,10 +265,9 @@ def run_epoch(data_holder,model,use_gpu,loss_function,optimizer,embedding_dim,ou
         output_loss=output.view(len(output),-1)
         output_tensor=output_tensor.view(len(output_tensor))
         loss = loss_function(output_loss, output_tensor)
-        if train:
-            loss.backward()
-            optimizer.step()
-            model.zero_grad()
+        loss.backward()
+        optimizer.step()
+        model.zero_grad()
         for pred,out in zip(output,output_tensor):
             pred = torch.argmax(pred, 1)
             total+=1
@@ -275,7 +291,7 @@ def train_model(model,loss_function,data_holder,lr,epochs,embedding_dim,output_s
         shuffle(data_holder.sentences)
         model.train()
         model.zero_grad()
-        train_loss, train_acc = run_epoch(data_holder,model,use_gpu,loss_function,optimizer,embedding_dim,output_size,True,repr,accuracy_list)
+        train_loss, train_acc = run_epoch(data_holder,model,use_gpu,loss_function,optimizer,embedding_dim,output_size,repr,accuracy_list)
         model.eval()
         print("{} - train loss {} train-accuracy {} ".format(epoch, train_loss, train_acc))
 
