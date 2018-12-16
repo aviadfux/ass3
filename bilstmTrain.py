@@ -14,6 +14,7 @@ EMBEDDING_DIM=50
 HIDDEN_DIM=70
 EPOCHS=5
 SENTENCE_BATCH=500
+DROPOUT_P=0.4
 LR=0.005
 # use_gpu=torch.cuda.is_available()
 use_gpu=False
@@ -125,7 +126,7 @@ class biLSTM(nn.Module):
         self.lstm_backward1 = nn.LSTM(embedding_dim,hidden_dim)
         self.lstm_forward2 = nn.LSTM(hidden_dim*2, hidden_dim)
         self.lstm_backward2 = nn.LSTM(hidden_dim*2, hidden_dim)
-
+        self.dropout= nn.Dropout(DROPOUT_P)
         self.linear= nn.Linear(hidden_dim*2,output_size)
         self.linear_d=nn.Linear(embedding_dim*2,embedding_dim)
 
@@ -163,7 +164,7 @@ class biLSTM(nn.Module):
         second_concat=torch.stack(second_concat)
         predictions=torch.zeros(len(input),1,output_size)
         for i,s in enumerate(second_concat):
-            output=self.linear(s)
+            output=self.linear(self.dropout(s))
             probs= torch.softmax(output,dim=1)
             predictions[i]=probs
         return predictions
